@@ -9,6 +9,7 @@ const DEFAULTS = {
   EXECUTION_TIMEOUT_MS: 300_000, // our watchdog; independent of TinyFish's own limit
   MAX_CONCURRENT_EXECUTIONS: 3,
   VERIFICATION_TIMEOUT_MS: 20_000,
+  DATABASE_PATH: 'data/flowfix.db',
 };
 
 function intOr(value, fallback) {
@@ -30,7 +31,16 @@ export function loadConfig(env = process.env) {
     verification: {
       baseUrl: (env.VERIFICATION_ENGINE_URL || '').trim().replace(/\/+$/, ''),
       timeoutMs: intOr(env.VERIFICATION_TIMEOUT_MS, DEFAULTS.VERIFICATION_TIMEOUT_MS),
+      // 'local' (default) evaluates checks in-process when no external engine
+      // is configured; 'off' restores engine-or-UNAVAILABLE behaviour.
+      localEnabled: (env.LOCAL_VERIFICATION || 'on').toLowerCase() !== 'off',
     },
+    database: {
+      path: (env.DATABASE_PATH || '').trim() || DEFAULTS.DATABASE_PATH,
+    },
+    // Trusted browser origins for CORS. Empty → same-origin/no CORS needed
+    // (localhost dev). '*' is only used when explicitly configured.
+    corsOrigins: (env.CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
   };
 
   config.tinyfish.configured = config.tinyfish.apiKey.length > 0;

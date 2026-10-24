@@ -8,6 +8,7 @@
 import { Router } from 'express';
 import { asyncRoute, NotFoundError, ValidationError, AppError } from '../errors.js';
 import { SCENARIOS, getScenario, scenarioSummaries } from '../scenarios/index.js';
+import { normalizeChecks } from '../checks/validate.js';
 
 const PROFILE_VALUES = new Set(['lite', 'stealth']);
 
@@ -42,6 +43,7 @@ function validateExecutionInput(body) {
       url: scenario.url,
       goal: scenario.goal,
       expectedOutcome: scenario.expected_outcome,
+      checks: scenario.checks ?? [],
       browserProfile: scenario.browserProfile,
       agentConfig: scenario.agentConfig,
       captureConfig: scenario.captureConfig,
@@ -62,6 +64,7 @@ function validateExecutionInput(body) {
       url: body.url,
       goal: body.goal,
       expectedOutcome: body.expected_outcome ?? null,
+      checks: normalizeChecks(body.checks),
       browserProfile: body.browser_profile ?? undefined,
       agentConfig: body.agent_config ?? undefined,
       captureConfig: body.capture_config ?? undefined,
@@ -76,6 +79,22 @@ function validateExecutionInput(body) {
   }
 
   return spec;
+}
+
+/**
+ * Clamped pagination. `?limit=abc` or a negative offset must never turn into
+ * NaN slicing (which silently returned every row).
+ */
+function parseLimit(value, fallback, max = 200) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, 1), max);
+}
+
+function parseOffset(value) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(n, 0);
 }
 
 export function createRoutes({ engine, config }) {
@@ -106,8 +125,25 @@ export function createRoutes({ engine, config }) {
   }));
 
   router.get('/executions', (req, res) => {
-    const limit = req.query.limit ? Number(req.query.limit) : 50;
-    res.json({ executions: engine.list({ limit }) });
+    // Searchable run history: full-text over url/goal/requirement/id plus
+    // status, verdict, contract, scenario and time-window filters.
+    const result = engine.search({
+      q: req.query.q ?? null,
+      status: req.query.status ?? null,
+      verdict: req.query.verdict ?? null,
+      contract_id: req.query.contract_id ?? null,
+      scenario_id: req.query.scenario_id ?? null,
+      from: req.query.from ?? null,
+      to: req.query.to ?? null,
+      limit: parseLimit(req.query.limit, 50),
+      offset: parseOffset(req.query.offset),
+    });
+    res.json({
+      executions: result.executions,
+      total: result.total,
+      limit: result.limit,
+      offset: result.offset,
+    });
   });
 
   router.get('/executions/:id', asyncRoute((req, res) => {

@@ -10,7 +10,16 @@ const { app, config } = createApp();
 const server = app.listen(config.port, () => {
   console.log(`[flowfix] backend listening on :${config.port}`);
   console.log(`[flowfix] TinyFish configured: ${config.tinyfish.configured ? 'yes' : 'NO (executions will fail with TINYFISH_NOT_CONFIGURED)'}`);
-  console.log(`[flowfix] Verification engine configured: ${config.verification.configured ? config.verification.baseUrl : 'NO (verdicts stay null until configured)'}`);
+  console.log(
+    `[flowfix] Verification engine: ${
+      config.verification.configured
+        ? `external (${config.verification.baseUrl})`
+        : config.verification.localEnabled
+          ? 'local (FlowFix independent verifier — checks only)'
+          : 'disabled (verdicts stay null until configured)'
+    }`,
+  );
+  console.log(`[flowfix] Database: ${config.database.path}`);
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

@@ -18,6 +18,8 @@
 import crypto from 'node:crypto';
 import { AppError, ConcurrencyLimitError, ExecutionTimeoutError, NotFoundError } from '../errors.js';
 import { normalizeExecution } from './normalize.js';
+import { collectEvidence } from '../verification/evidence.js';
+import { verifyWithChecks } from '../verification/local-engine.js';
 
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'TIMED_OUT', 'CANCELLED', 'INCOMPLETE']);
 
@@ -31,16 +33,52 @@ export class ExecutionEngine {
    *   fetchRunObject?: boolean,
    * }} deps
    */
-  constructor({ tinyfish, verifier, timeoutMs = 300_000, maxConcurrent = 3, maxRetained = 500, fetchRunObject = true }) {
+  constructor({
+    tinyfish,
+    verifier,
+    timeoutMs = 300_000,
+    maxConcurrent = 3,
+    maxRetained = 500,
+    fetchRunObject = true,
+    persistence = null,
+    audit = null,
+    queue = null,
+    localVerification = true,
+    evidenceFetcher = null,
+  }) {
     this.tinyfish = tinyfish;
     this.verifier = verifier;
     this.timeoutMs = timeoutMs;
     this.maxConcurrent = maxConcurrent;
     this.maxRetained = maxRetained;
     this.fetchRunObject = fetchRunObject;
+    /** Durable execution history (SQLite repository). Live runs stay in memory. */
+    this.persistence = persistence;
+    this.audit = audit;
+    this.queue = queue;
+    /** Use FlowFix's own independent verifier when no external engine is set. */
+    this.localVerification = localVerification;
+    /** Injectable page fetcher for independent evidence (tests replace it). */
+    this.evidenceFetcher = evidenceFetcher;
     /** @type {Map<string, object>} */
     this.executions = new Map();
     this.runningCount = 0;
+
+    if (this.queue) {
+      // Serialisable payload ({ execution_id }) so a Redis/BullMQ driver can
+      // carry the same job later without changing this contract.
+      this.queue.register('execution.run', async ({ execution_id: id }) => {
+        const execution = this.executions.get(id);
+        if (!execution) throw new NotFoundError(`Execution ${id} not found`);
+        try {
+          await execution.run();
+        } catch (err) {
+          execution.markCrashed(err);
+        } finally {
+          this.runningCount -= 1;
+        }
+      });
+    }
   }
 
   /**
@@ -60,15 +98,55 @@ export class ExecutionEngine {
   /** Public snapshot of an execution (defensive copy of shareable fields). */
   get(executionId) {
     const exec = this.executions.get(executionId);
-    if (!exec) throw new NotFoundError(`Execution ${executionId} not found`);
-    return exec.publicView();
+    if (exec) return exec.publicView();
+    // Evicted or previously-restarted run: history lives in SQLite.
+    if (this.persistence) {
+      const row = this.persistence.get(executionId);
+      if (row) return viewFromRow(row, this.timeoutMs);
+    }
+    throw new NotFoundError(`Execution ${executionId} not found`);
   }
 
   list({ limit = 50 } = {}) {
-    return [...this.executions.values()]
-      .slice(-limit)
-      .reverse()
-      .map((e) => e.publicView());
+    return this.search({ limit }).executions;
+  }
+
+  /**
+   * Searchable, paginated run history backed by the database. Live runs are
+   * overlaid with their in-memory view so status is never stale.
+   */
+  search({
+    q = null,
+    status = null,
+    verdict = null,
+    contract_id = null,
+    scenario_id = null,
+    from = null,
+    to = null,
+    limit = 50,
+    offset = 0,
+  } = {}) {
+    if (!this.persistence) {
+      const live = [...this.executions.values()].slice(-limit).reverse().map((e) => e.publicView());
+      return { executions: live, total: live.length, limit, offset: 0 };
+    }
+    const { executions, total } = this.persistence.search({
+      q,
+      status,
+      verdict,
+      contract_id,
+      scenario_id,
+      from,
+      to,
+      limit,
+      offset,
+      includeBody: true,
+    });
+    const rows = executions.map((row) => {
+      const live = this.executions.get(row.id);
+      return live ? live.publicView() : viewFromRow(row, this.timeoutMs);
+    });
+    return { executions: rows, total, limit, offset };
   }
 
   /**
@@ -98,15 +176,53 @@ export class ExecutionEngine {
     this.evictIfNeeded();
     this.runningCount += 1;
 
-    // Fire and forget; errors are captured on the record itself.
-    execution
-      .run()
-      .catch((err) => execution.markCrashed(err))
-      .finally(() => {
-        this.runningCount -= 1;
+    try {
+      execution.persist();
+      this.safeAudit({
+        actor: 'system',
+        action: 'execution.created',
+        entityType: 'execution',
+        entityId: execution.id,
+        details: {
+          contract_id: spec.contractId ?? null,
+          scenario_id: spec.scenarioId ?? null,
+          url: spec.url,
+          checks: (spec.checks ?? []).length,
+        },
       });
 
+      // Dispatch through the queue (in-process driver today, Redis/BullMQ
+      // later) — same fire-and-forget semantics; errors land on the record.
+      if (this.queue) {
+        this.queue.enqueue('execution.run', { execution_id: execution.id });
+      } else {
+        execution
+          .run()
+          .catch((err) => execution.markCrashed(err))
+          .finally(() => {
+            this.runningCount -= 1;
+          });
+      }
+    } catch (err) {
+      // Never leave a half-created execution holding a concurrency slot.
+      this.runningCount -= 1;
+      this.executions.delete(execution.id);
+      throw err;
+    }
+
     return execution.publicView();
+  }
+
+  /**
+   * Audit writes are observability, not business logic: a failure here is
+   * logged and swallowed so it can never fail a request or a run.
+   */
+  safeAudit(entry) {
+    try {
+      this.audit?.record(entry);
+    } catch (err) {
+      console.error(`[flowfix] audit write failed: ${err.message}`);
+    }
   }
 
   /** Cancel a running execution; idempotent like TinyFish's own cancel. */
@@ -168,7 +284,22 @@ class Execution {
     this.emit({ kind: 'status', status, at: new Date().toISOString() });
     if (TERMINAL_STATUSES.has(status)) {
       this.finishedAt = new Date().toISOString();
+      this.persist();
       this.emit({ kind: 'terminal', status });
+      this.engine.safeAudit({
+        actor: 'system',
+        action: 'execution.terminal',
+        entityType: 'execution',
+        entityId: this.id,
+        details: {
+          status,
+          verdict: this.verification?.verdict ?? null,
+          verification_status: this.verification?.status ?? null,
+          error_code: this.error?.code ?? null,
+        },
+      });
+    } else {
+      this.persist();
     }
   }
 
@@ -176,9 +307,11 @@ class Execution {
     return {
       execution_id: this.id,
       scenario_id: this.spec.scenarioId ?? null,
+      contract_id: this.spec.contractId ?? null,
       requirement: this.spec.requirement ?? null,
       url: this.spec.url,
       goal: this.spec.goal,
+      checks: this.spec.checks ?? [],
       expected_outcome: this.spec.expectedOutcome ?? null,
       status: this.status,
       created_at: this.createdAt,
@@ -187,7 +320,42 @@ class Execution {
       error: this.error,
       record: this.record,
       verification: this.verification,
+      root_cause: this.rootCause ?? null,
     };
+  }
+
+  /**
+   * Persist the full execution snapshot (status, record, verification, raw
+   * event log) to the durable store. Persistence failures must never break a
+   * live run — they are surfaced as `lastPersistError` for diagnostics.
+   */
+  persist() {
+    if (!this.engine.persistence) return;
+    try {
+      this.engine.persistence.save({
+        id: this.id,
+        contract_id: this.spec.contractId ?? null,
+        scenario_id: this.spec.scenarioId ?? null,
+        status: this.status,
+        url: this.spec.url,
+        goal: this.spec.goal,
+        requirement: this.spec.requirement ?? null,
+        expected_outcome: this.spec.expectedOutcome ?? null,
+        checks: this.spec.checks ?? null,
+        spec: this.spec,
+        error: this.error,
+        record: this.record,
+        verification: this.verification,
+        events: this.events,
+        root_cause: this.rootCause ?? null,
+        created_at: this.createdAt,
+        finished_at: this.finishedAt,
+      });
+      this.lastPersistError = null;
+    } catch (err) {
+      this.lastPersistError = err;
+      console.error(`[flowfix] failed to persist execution ${this.id}: ${err.message}`);
+    }
   }
 
   requestCancel() {
@@ -300,6 +468,7 @@ class Execution {
       runObject,
       upstreamError: failedUpstream ? (completeEvent?.error ?? runObject?.error ?? null) : null,
     });
+    this.persist();
     if (evidenceFetchError) {
       this.record.evidence_fetch_error = evidenceFetchError;
       this.record.evidence_note =
@@ -327,6 +496,7 @@ class Execution {
   finalizeRecord({ timedOut = false, cancelled = false } = {}) {
     if (this.record) return; // already finalized by normal path
     this.record = normalizeExecution({ events: this.events, runObject: null, timedOut, cancelled });
+    this.persist();
     this.emit({ kind: 'record', record: this.record });
     // Every path that finalizes outside the success flow is a failure path:
     // verification must settle at SKIPPED with verdict null — never left
@@ -346,8 +516,16 @@ class Execution {
       details: {
         reason: 'Execution did not complete successfully; requirement verification was not attempted.',
         execution_status: executionStatus,
+        reason_codes: [
+          executionStatus === 'TIMED_OUT'
+            ? 'EXECUTION_TIMEOUT'
+            : executionStatus === 'CANCELLED'
+              ? 'EXECUTION_CANCELLED'
+              : 'EXECUTION_FAILED',
+        ],
       },
     };
+    this.persist();
     this.emit({ kind: 'verification', verification: this.verification });
   }
 
@@ -364,19 +542,60 @@ class Execution {
       return;
     }
     if (!this.engine.verifier.isConfigured()) {
+      // No external engine — FlowFix's own independent verifier takes over
+      // *only* when the requirement actually carries machine-verifiable
+      // checks. Without checks there is nothing to prove: stay UNAVAILABLE
+      // with a null verdict rather than inventing one.
+      const checks = this.spec.checks ?? [];
+      if (this.engine.localVerification && checks.length > 0) {
+        this.verification = { status: 'RUNNING', verdict: null, details: null };
+        this.emit({ kind: 'verification', verification: this.verification });
+        try {
+          const evidence = await collectEvidence({
+            record: this.record,
+            targetUrl: this.spec.url,
+            fetcher: this.engine.evidenceFetcher ?? undefined,
+          });
+          this.verification = verifyWithChecks({
+            executionId: this.id,
+            requirementId: this.spec.contractId ?? this.spec.scenarioId ?? null,
+            requirement: this.spec.requirement,
+            checks,
+            record: this.record,
+            evidence,
+            externalResults: this.spec.externalResults ?? null,
+          });
+        } catch (err) {
+          this.verification = {
+            status: 'ERROR',
+            verdict: null,
+            details: {
+              reason: err?.message ?? String(err),
+              code: err?.code ?? 'VERIFICATION_ERROR',
+              reason_codes: ['VERIFICATION_ENGINE_ERROR'],
+            },
+          };
+        }
+        this.persist();
+        this.emit({ kind: 'verification', verification: this.verification });
+        return;
+      }
       this.verification = {
         status: 'UNAVAILABLE',
         verdict: null,
         details: {
           reason: 'Verification engine is not configured (VERIFICATION_ENGINE_URL is empty). Browser execution succeeded but the requirement is NOT yet verified.',
+          reason_codes: ['VERIFICATION_UNAVAILABLE', 'NO_CHECKS_DEFINED'],
         },
       };
+      this.persist();
       this.emit({ kind: 'verification', verification: this.verification });
       return;
     }
 
     this.verification = { status: 'RUNNING', verdict: null, details: null };
     this.emit({ kind: 'verification', verification: this.verification });
+    this.persist();
 
     try {
       const outcome = await this.engine.verifier.verify({
@@ -394,9 +613,42 @@ class Execution {
       this.verification = {
         status: 'ERROR',
         verdict: null,
-        details: { reason: err?.message ?? String(err), code: err?.code ?? 'VERIFICATION_ERROR' },
+        details: {
+          reason: err?.message ?? String(err),
+          code: err?.code ?? 'VERIFICATION_ERROR',
+          reason_codes: ['VERIFICATION_ENGINE_ERROR'],
+        },
       };
     }
+    this.persist();
     this.emit({ kind: 'verification', verification: this.verification });
   }
+}
+
+/**
+ * Rebuild a public execution view from a persisted row (run history).
+ * Used when an execution has been evicted from memory or the process that
+ * created it is no longer running.
+ */
+export function viewFromRow(row, engineTimeoutMs = 300_000) {
+  const spec = row.spec ?? {};
+  return {
+    execution_id: row.id,
+    scenario_id: row.scenario_id ?? null,
+    contract_id: row.contract_id ?? null,
+    requirement: row.requirement ?? null,
+    url: row.url,
+    goal: row.goal,
+    checks: row.checks ?? [],
+    expected_outcome: row.expected_outcome ?? null,
+    status: row.status,
+    created_at: row.created_at,
+    finished_at: row.finished_at ?? null,
+    timeout_ms: spec.executionTimeoutMs ?? engineTimeoutMs,
+    error: row.error ?? null,
+    record: row.record ?? null,
+    verification: row.verification ?? { status: 'PENDING', verdict: null, details: null },
+    root_cause: row.root_cause ?? null,
+    from_history: true,
+  };
 }
