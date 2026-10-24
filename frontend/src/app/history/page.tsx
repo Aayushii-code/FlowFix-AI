@@ -13,7 +13,24 @@ export default function HistoryPage(){
   const [error,setError]=useState<string|null>(null);
   const [query,setQuery]=useState("");
   const load=useCallback(async()=>{setLoading(true);setError(null);try{setRuns(await listRuns());}catch(e){setError(e instanceof Error?e.message:"Couldn't retrieve run history.");setRuns(null);}finally{setLoading(false);}},[]);
-  useEffect(()=>{void load();},[load]);
+  useEffect(() => {
+    let active = true;
+    listRuns()
+      .then((data) => {
+        if (!active) return;
+        setRuns(data);
+        setError(null);
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setError(cause instanceof Error ? cause.message : "Couldn't retrieve run history.");
+        setRuns(null);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
   const filtered=(runs||[]).filter(run=>`${run.url} ${run.requirement} ${run.id}`.toLowerCase().includes(query.toLowerCase())).sort((a,b)=>Date.parse(b.createdAt)-Date.parse(a.createdAt));
   return <div className="page-stack"><div className="page-intro"><div><div className="eyebrow eyebrow-with-dot"><span/> EXECUTION LIBRARY</div><h1>Run history<span className="headline-dot">.</span></h1><p>Every item here comes from a real recorded execution. No sample runs.</p></div><Link href="/tests/new" className="button button-primary"><Plus size={17}/> New test</Link></div>
     <Panel><div className="history-toolbar"><div className="history-heading"><div className="heading-icon"><History size={19}/></div><div><h2>All executions</h2><p>{runs?`${runs.length} recorded runs`:"Connect backend to load runs"}</p></div></div><div className="toolbar-actions"><div className="search-box"><Search size={17}/><input aria-label="Search actual runs" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search real runs…"/></div><button onClick={()=>void load()} className="icon-button refresh-button" aria-label="Refresh run history" title="Refresh actual data"><RotateCw size={18}/></button></div></div>
