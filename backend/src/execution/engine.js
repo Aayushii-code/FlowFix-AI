@@ -214,6 +214,21 @@ export class ExecutionEngine {
   }
 
   /**
+   * Attach a root-cause diagnosis to an execution — both in memory (so the
+   * live view shows it) and in the durable record (so history keeps it).
+   */
+  setRootCause(executionId, analysis) {
+    const execution = this.executions.get(executionId);
+    if (execution) {
+      execution.rootCause = analysis;
+      execution.persist();
+    } else if (this.persistence) {
+      this.persistence.setRootCause(executionId, analysis);
+    }
+    return analysis;
+  }
+
+  /**
    * Audit writes are observability, not business logic: a failure here is
    * logged and swallowed so it can never fail a request or a run.
    */
