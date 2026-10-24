@@ -15,7 +15,24 @@ export default function RunDetailsPage(){
   const [error,setError]=useState<string|null>(null);
   const [loading,setLoading]=useState(true);
   const load=useCallback(async()=>{if(!id)return;setError(null);try{setRun(await getRun(id));}catch(e){setError(e instanceof Error?e.message:"Unable to retrieve execution.");}finally{setLoading(false);}},[id]);
-  useEffect(()=>{void load();},[load]);
+  useEffect(() => {
+    if (!id) return;
+    let active = true;
+    getRun(id)
+      .then((data) => {
+        if (!active) return;
+        setRun(data);
+        setError(null);
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setError(cause instanceof Error ? cause.message : "Unable to retrieve execution.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [id]);
   useEffect(()=>{if(!run||!(["queued","running"] as string[]).includes(run.status))return;const handle=window.setInterval(()=>{void load();},4500);return()=>window.clearInterval(handle);},[run,load]);
   return <div className="page-stack"><div className="page-intro"><div><div className="eyebrow eyebrow-with-dot"><span/> EXECUTION DETAILS</div><h1>Test report<span className="headline-dot">.</span></h1><p>Actual run state and independently verified observations.</p></div><div className="page-actions"><Link href="/history" className="button button-outline"><ArrowLeft size={16}/> Run history</Link><button className="button button-primary" onClick={()=>{setLoading(true);void load();}}><RefreshCw size={17}/> Refresh</button></div></div>
   {error&&<ErrorNotice message={error} retry={()=>{setLoading(true);void load();}}/>}
