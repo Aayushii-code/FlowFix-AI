@@ -1,7 +1,7 @@
 "use client";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, ArrowLeft, ArrowRight, Braces, Check, ChevronDown, Globe2, Plus, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, Braces, Check, ChevronDown, CircleHelp, Globe2, Plus, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { createRun } from "@/lib/api";
 import type { ComparisonOperator, VerificationCheck } from "@/lib/contracts";
@@ -37,6 +37,6 @@ export default function NewTestPage() {
       <div className="form-submit-row"><div><ShieldCheck size={17}/><span>No simulated results. All runs must come from the backend.</span></div><button className="button button-primary submit-button" type="submit" disabled={submitting}>{submitting?"Starting real run…":"Run test"}<ArrowRight size={17}/></button></div>
       </div>
     </form>
-    <aside className="builder-aside"><div className="aside-card purple-note"><div className="aside-icon"><Sparkles size={22}/></div><h3>Test real behavior.</h3><p>FlowFix asks TinyFish to perform website actions, then compares returned observations with your configured expectations.</p><div className="aside-points"><span><Check size={15}/> Actual browser execution</span><span><Check size={15}/> Explicit comparisons</span><span><Check size={15}/> No invented verdicts</span></div></div><div className="aside-card"><div className="aside-heading"><CircleHelp size={18}/><h3>Before you begin</h3></div><div className="aside-list"><div><span>01</span><p>Use an authorized, publicly accessible site. Localhost won't be reachable by a cloud agent.</p></div><div><span>02</span><p>Make your instruction specific. Include the actions and which values to observe.</p></div><div><span>03</span><p>Observation keys are matched to real returned fields—not hardcoded sample data.</p></div><div><span>04</span><p>Testing backend must be connected before a real test can start.</p></div></div></div></aside></div>
+    <aside className="builder-aside"><div className="aside-card purple-note"><div className="aside-icon"><Sparkles size={22}/></div><h3>Test real behavior.</h3><p>FlowFix asks TinyFish to perform website actions, then compares returned observations with your configured expectations.</p><div className="aside-points"><span><Check size={15}/> Actual browser execution</span><span><Check size={15}/> Explicit comparisons</span><span><Check size={15}/> No invented verdicts</span></div></div><div className="aside-card"><div className="aside-heading"><CircleHelp size={18}/><h3>Before you begin</h3></div><div className="aside-list"><div><span>01</span><p>Use an authorized, publicly accessible site. Localhost won&apos;t be reachable by a cloud agent.</p></div><div><span>02</span><p>Make your instruction specific. Include the actions and which values to observe.</p></div><div><span>03</span><p>Observation keys are matched to real returned fields—not hardcoded sample data.</p></div><div><span>04</span><p>Testing backend must be connected before a real test can start.</p></div></div></div></aside></div>
   </div>;
 }
