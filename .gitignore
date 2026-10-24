@@ -1,9 +1,24 @@
+# Dependencies
 node_modules/
-.next/
-out/
-.vercel/
+backend/node_modules/
+
+# Environment secrets
 .env
-.env.local
-.env.*.local
-*.tsbuildinfo
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+.next/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS and editor
 .DS_Store
+Thumbs.db
+.vscode/
+**/node_modules/
