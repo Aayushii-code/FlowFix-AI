@@ -1,0 +1,30 @@
+{
+  "name": "flowfix-ai-backend",
+  "version": "1.0.0",
+  "description": "FlowFix AI backend: TinyFish browser automation execution engine with SSE streaming, evidence normalization, and verification hand-off.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test \"test/unit/*.test.js\" \"test/integration/*.test.js\"",
+    "test:unit": "node --test \"test/unit/*.test.js\"",
+    "test:integration": "node --test \"test/integration/*.test.js\"",
+    "smoke:live": "node scripts/smoke-live.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "flowfix",
+    "tinyfish",
+    "browser-automation",
+    "sse",
+    "verification"
+  ],
+  "license": "UNLICENSED",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
