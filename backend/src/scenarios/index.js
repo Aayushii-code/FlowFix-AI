@@ -28,7 +28,6 @@ export const SCENARIOS = [
       condition: 'at least one product whose name contains "table" (case-insensitive)',
     },
     browserProfile: 'lite',
-    agentConfig: { max_steps: 30 },
     captureConfig: { screenshots: true },
   },
   {
@@ -44,7 +43,6 @@ export const SCENARIOS = [
       condition: 'submitted values are echoed in the response body',
     },
     browserProfile: 'lite',
-    agentConfig: { max_steps: 25 },
     captureConfig: { screenshots: true },
   },
   {
@@ -61,7 +59,6 @@ export const SCENARIOS = [
       condition: 'headline matches exactly and keyword appears in body text',
     },
     browserProfile: 'lite',
-    agentConfig: { max_steps: 10 },
     captureConfig: { screenshots: true },
   },
 ];
