@@ -15,7 +15,7 @@ async function forward(request: Request, context: { params: Promise<{ path: stri
   if (!['http:', 'https:'].includes(origin.protocol)) return Response.json({ error: 'Backend URL must be HTTP(S)' }, { status: 500 });
   const source = new URL(request.url);
   const target = `${base}/api/${endpoint}${source.search}`;
-  const options: RequestInit = { method: request.method, cache: 'no-store', signal: request.signal, headers: { 'Content-Type': 'application/json', Accept: 'application/json' } };
+  const options: RequestInit = { method: request.method, cache: 'no-store', signal: request.signal, headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'x-flowfix-internal-key': process.env.FLOWFIX_INTERNAL_API_KEY || '' } };
   if (!['GET','HEAD'].includes(request.method)) options.body = await request.text();
   try {
     const response = await fetch(target, options);
