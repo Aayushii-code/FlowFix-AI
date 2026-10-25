@@ -1,4 +1,4 @@
-﻿import type { TestRun, VerificationCheck, Verdict } from "./contracts";
+import type { TestRun, VerificationCheck, Verdict } from "./contracts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -25,10 +25,14 @@ export async function backendRequest(path: string, init: RequestInit = {}): Prom
     throw new BackendError("Invalid FLOWFIX_BACKEND_URL configuration.", 500);
   }
 
+  const authHeaders = new Headers(init.headers);
+  if (process.env.FLOWFIX_INTERNAL_API_KEY) authHeaders.set('x-flowfix-internal-key', process.env.FLOWFIX_INTERNAL_API_KEY);
+
   let response: Response;
   try {
     response = await fetch(url, {
       ...init,
+      headers: authHeaders,
       cache: "no-store",
       signal: AbortSignal.timeout(12000),
     });
