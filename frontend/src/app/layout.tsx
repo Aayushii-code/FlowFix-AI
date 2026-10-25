@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import './chatdeck-theme.css';
 import { AppShell } from '@/components/app-shell';
 
 export const metadata: Metadata = {
