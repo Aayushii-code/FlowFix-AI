@@ -26,3 +26,5 @@ Thumbs.db
 # Generated Next.js and TypeScript files
 **/next-env.d.ts
 **/*.tsbuildinfo
+
+*.tsx.bak
