@@ -6,7 +6,7 @@ import { LayoutDashboard, FlaskConical, ScrollText, History, ShoppingBag, Networ
 import { api, Capabilities } from '@/lib/platform';
 const nav = [
   { group: 'WORKSPACE', items: [
-    { label: 'Overview', href: '/', icon: LayoutDashboard },
+    { label: 'Overview', href: '/workspace', icon: LayoutDashboard },
     { label: 'New verification', href: '/tests/new', icon: FlaskConical },
     { label: 'Contract library', href: '/contracts', icon: ScrollText },
     { label: 'Execution history', href: '/history', icon: History },
@@ -27,6 +27,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileMenu, setMobileMenu] = useState(false);
   const [health, setHealth] = useState<Capabilities | null>(null);
   useEffect(() => { let mounted = true; api<Capabilities>('capabilities').then(x => { if (mounted) setHealth(x); }).catch(() => {}); return () => {mounted = false;}; }, []);
+  if (pathname === '/') return <>{children}</>;
   return <div className={`shell ${compact ? 'shell-compact' : ''}`}>
     <aside className={`sidebar ${mobileMenu ? 'sidebar-mobile-open' : ''}`}>
       <div className="brand-row"><Link href="/" className="brand" onClick={() => setMobileMenu(false)}><span className="brand-mark"><i/><i/><i/><i/></span><span className="brand-text"><strong>flowfix<span>.ai</span></strong><small>ASSURANCE OS</small></span></Link><button className="icon-btn sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setCompact(!compact)}>{compact ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}</button></div>
