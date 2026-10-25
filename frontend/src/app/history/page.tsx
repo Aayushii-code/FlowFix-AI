@@ -1,39 +1,7 @@
-"use client";
-import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-import { ChevronRight, History, Plus, RotateCw, Search } from "lucide-react";
-import { listRuns } from "@/lib/api";
-import type { TestRun } from "@/lib/contracts";
-import { prettyDate, hostFromUrl } from "@/lib/format";
-import { Badge, EmptyState, ErrorNotice, Loading, Panel } from "@/components/shared";
-
-export default function HistoryPage(){
-  const [runs,setRuns]=useState<TestRun[]|null>(null);
-  const [loading,setLoading]=useState(true);
-  const [error,setError]=useState<string|null>(null);
-  const [query,setQuery]=useState("");
-  const load=useCallback(async()=>{setLoading(true);setError(null);try{setRuns(await listRuns());}catch(e){setError(e instanceof Error?e.message:"Couldn't retrieve run history.");setRuns(null);}finally{setLoading(false);}},[]);
-  useEffect(() => {
-    let active = true;
-    listRuns()
-      .then((data) => {
-        if (!active) return;
-        setRuns(data);
-        setError(null);
-      })
-      .catch((cause: unknown) => {
-        if (!active) return;
-        setError(cause instanceof Error ? cause.message : "Couldn't retrieve run history.");
-        setRuns(null);
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => { active = false; };
-  }, []);
-  const filtered=(runs||[]).filter(run=>`${run.url} ${run.requirement} ${run.id}`.toLowerCase().includes(query.toLowerCase())).sort((a,b)=>Date.parse(b.createdAt)-Date.parse(a.createdAt));
-  return <div className="page-stack"><div className="page-intro"><div><div className="eyebrow eyebrow-with-dot"><span/> EXECUTION LIBRARY</div><h1>Run history<span className="headline-dot">.</span></h1><p>Every item here comes from a real recorded execution. No sample runs.</p></div><Link href="/tests/new" className="button button-primary"><Plus size={17}/> New test</Link></div>
-    <Panel><div className="history-toolbar"><div className="history-heading"><div className="heading-icon"><History size={19}/></div><div><h2>All executions</h2><p>{runs?`${runs.length} recorded runs`:"Connect backend to load runs"}</p></div></div><div className="toolbar-actions"><div className="search-box"><Search size={17}/><input aria-label="Search actual runs" value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search real runs…"/></div><button onClick={()=>void load()} className="icon-button refresh-button" aria-label="Refresh run history" title="Refresh actual data"><RotateCw size={18}/></button></div></div>
-      {loading?<Loading/>:error?<div className="panel-inset"><ErrorNotice message={error} retry={()=>void load()}/></div>:runs&&runs.length===0?<EmptyState title="Your history starts here" message="Once your first real browser run finishes, its record will appear here."/>:filtered.length===0?<div className="filtered-empty">No actual runs match your search.</div>:<div className="history-table"><div className="table-head"><span>WEBSITE & REQUIREMENT</span><span>STARTED</span><span>STATUS</span><span>VERDICT</span><span/></div>{filtered.map(run=><Link href={`/runs/${encodeURIComponent(run.id)}`} key={run.id} className="table-row"><div className="table-primary"><strong>{hostFromUrl(run.url)}</strong><span>{run.requirement}</span></div><span className="table-date">{prettyDate(run.createdAt)}</span><Badge status={run.status}/><span>{run.verdict?<Badge verdict={run.verdict}/>:<span className="table-dash">—</span>}</span><ChevronRight size={17} className="table-arrow"/></Link>)}</div>}
-    </Panel></div>;
+'use client';
+import Link from 'next/link';import {useCallback,useEffect,useState} from 'react';import {ArrowRight,ShieldCheck} from 'lucide-react';
+import {api,Execution,formatDate,shortId} from '@/lib/platform';import {Empty,ErrorBanner,Input,PageTitle,Panel,PrimaryLink,Refresh,Select,Spinner,Status,Verdict} from '@/components/ui';
+export default function History(){const [items,setItems]=useState<Execution[]>([]);const [total,setTotal]=useState(0);const [q,setQ]=useState('');const [status,setStatus]=useState('');const [verdict,setVerdict]=useState('');const [offset,setOffset]=useState(0);const [loading,setLoading]=useState(true);const [error,setError]=useState<unknown>(null);const limit=25;
+ const load=useCallback(async()=>{setLoading(true);setError(null);try{const qs=new URLSearchParams({limit:String(limit),offset:String(offset)});if(q)qs.set('q',q);if(status)qs.set('status',status);if(verdict)qs.set('verdict',verdict);const x=await api<{executions:Execution[];total:number}>(`executions?${qs}`);setItems(x.executions??[]);setTotal(x.total??0);}catch(e){setError(e);}finally{setLoading(false);}},[q,status,verdict,offset]);useEffect(()=>{const timer=setTimeout(()=>{void load();},0);return()=>clearTimeout(timer);},[load]);
+ return <><PageTitle eyebrow="RELIABLE / HISTORY" title="Every run has a record." description="Searchable execution history backed by the upgraded SQLite repository. Status and verification are always distinct." action={<Refresh onClick={()=>void load()} loading={loading}/>}/><ErrorBanner error={error}/><Panel title="Execution explorer" subtitle={`${total} stored execution(s) match the current filters`} action={<PrimaryLink href="/tests/new">New test</PrimaryLink>}><div className="form-row" style={{marginBottom:18}}><Input label="Search target, requirement or run ID" placeholder="Search runs…" value={q} onChange={e=>{setOffset(0);setQ(e.target.value);}}/><Select label="Execution status" value={status} onChange={e=>{setOffset(0);setStatus(e.target.value);}}><option value="">All statuses</option>{['QUEUED','RUNNING','COMPLETED','FAILED','TIMED_OUT','CANCELLED','INCOMPLETE'].map(v=><option key={v}>{v}</option>)}</Select><Select label="Verified outcome" value={verdict} onChange={e=>{setOffset(0);setVerdict(e.target.value);}}><option value="">Any verdict</option>{['PASS','FAIL','INCONCLUSIVE','NONE'].map(v=><option key={v}>{v}</option>)}</Select></div>{loading?<Spinner/>:items.length===0?<Empty title="No matching executions" text="Change the filters or start a new verification. No sample runs are generated." action={<PrimaryLink href="/tests/new">Start verification</PrimaryLink>}/>:<div className="table-wrap"><table className="data-table"><thead><tr><th>Run</th><th>Target</th><th>Execution</th><th>Verification</th><th>Created</th><th></th></tr></thead><tbody>{items.map(r=><tr key={r.execution_id}><td><Link className="primary mono" href={`/runs/${r.execution_id}`}>{shortId(r.execution_id)}</Link></td><td><strong className="primary">{r.url?new URL(r.url).hostname:'—'}</strong><div className="muted text-xs" style={{marginTop:5,maxWidth:260,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.requirement??r.goal??'No requirement'}</div></td><td><Status value={r.status}/></td><td><Verdict value={r.verification?.verdict}/></td><td>{formatDate(r.created_at)}</td><td><Link href={`/runs/${r.execution_id}`} className="link"><ArrowRight size={15}/></Link></td></tr>)}</tbody></table></div>}<div className="between" style={{marginTop:20}}><span className="muted text-xs">Showing {items.length===0?0:offset+1}–{Math.min(offset+items.length,total)} of {total}</span><div className="row"><button className="btn btn-outline btn-mini" disabled={offset===0||loading} onClick={()=>setOffset(Math.max(0,offset-limit))}>Previous</button><button className="btn btn-outline btn-mini" disabled={offset+limit>=total||loading} onClick={()=>setOffset(offset+limit)}>Next</button></div></div></Panel><div className="notice" style={{marginTop:18}}><ShieldCheck size={17}/>This screen displays server-returned history only. Results survive backend restarts when SQLite storage is available.</div></>;
 }
