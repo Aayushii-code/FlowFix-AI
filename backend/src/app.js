@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Application assembly: config → database → TinyFish client → verification →
  * queue → execution engine → routes → dashboard. Kept separate from
  * server.js so tests can build an app against a mock TinyFish base URL
@@ -7,6 +7,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import { requireInternalKey } from './middleware/internal-api-key.js';
+import { requireApprovedTargets } from './middleware/approved-targets.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/index.js';
 import { createContractRepository } from './db/repos/contracts.js';
@@ -95,6 +97,8 @@ export function createApp(env = process.env) {
     next();
   });
 
+  app.use('/api', requireInternalKey(env));
+  app.use('/api', requireApprovedTargets(env, repos));
   app.use('/api', createContractRoutes({ repos, engine, config }));
   app.use('/api', createSystemRoutes({ repos, config }));
   app.use('/api', createAssuranceRoutes({ engine, repos }));
