@@ -55,17 +55,24 @@ export function normalizeChecks(raw, label = 'checks') {
       throw new ValidationError(`${at}.severity must be one of: ${[...SEVERITIES].join(', ')}`);
     }
 
+    if (check.via !== undefined && typeof check.via !== 'string') {
+      throw new ValidationError(`${at}.via must be a string (the connector step key that feeds this check)`);
+    }
     return {
       key: check.key.trim(),
       description: typeof check.description === 'string' ? check.description : null,
       source: check.source ?? 'page',
       operator: check.operator,
       expected: check.expected ?? null,
+      ...(check.via ? { via: check.via } : {}),
       ...(check.path !== undefined ? { path: check.path } : {}),
       ...(check.pattern !== undefined ? { pattern: check.pattern } : {}),
       ...(check.transform !== undefined ? { transform: check.transform } : {}),
       ...(check.severity !== undefined ? { severity: check.severity } : {}),
       ...(check.required !== undefined ? { required: Boolean(check.required) } : {}),
+      ...(Array.isArray(check.depends_on) && check.depends_on.length
+        ? { depends_on: check.depends_on.filter((d) => typeof d === 'string') }
+        : {}),
     };
   });
 }

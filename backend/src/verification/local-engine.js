@@ -72,10 +72,11 @@ function resolveObserved(check, { record, evidence, externalResults }) {
   }
 
   // api / database / sandbox results are supplied by the caller that ran the
-  // independent query (cross-system verification).
+  // independent query (cross-system verification). `via` lets one connector
+  // step feed several checks (key is the check's own id, via is the step).
   const bucket = externalResults?.[source];
   if (!bucket) return { observed: undefined, ref: null, source };
-  const entry = bucket[check.key];
+  const entry = bucket[check.via ?? check.key];
   if (entry === undefined) return { observed: undefined, ref: null, source };
   // Entries may be plain values, or { value, evidence_ref } wrappers carrying
   // their own provenance reference.
@@ -182,6 +183,151 @@ function sourceAvailability(source, context) {
     : { available: false, reason: 'EVIDENCE_MISSING' };
 }
 
+/** A check blocked because its dependency did not pass — inconclusive, never a failure. */
+function blockedCheck(check, dependsOn, reasonCodes, unmet) {
+  const source = check.source ?? 'page';
+  return {
+    key: check.key,
+    description: check.description ?? null,
+    source,
+    independent: INDEPENDENT_SOURCES.has(source),
+    operator: check.operator ?? 'equals',
+    expected: check.expected ?? null,
+    observed: null,
+    status: 'inconclusive',
+    severity: check.severity ?? 'medium',
+    required: check.required !== false,
+    reason_codes: reasonCodes,
+    evidence_ref: null,
+    skipped: true,
+    depends_on: dependsOn,
+    unmet_dependencies: unmet,
+  };
+}
+
+/** Resolve one operand of a cross-system comparison from its evidence source. */
+function resolveOperand(operand, context) {
+  const miss = (source = null, independent = false) => ({
+    found: false,
+    value: undefined,
+    ref: null,
+    independent,
+    source,
+  });
+  if (!operand || typeof operand !== 'object') return miss();
+  const source = operand.source;
+
+  if (source === 'page') {
+    const pages = (context.evidence?.pages ?? []).filter((page) => page.ok);
+    if (pages.length === 0) return miss('page');
+    const text = pages.map((page) => page.text).join('\n');
+    const ref = `page:${pages[0].url}`;
+    if (operand.pattern) {
+      const match = new RegExp(operand.pattern, 'i').exec(text);
+      return match ? { found: true, value: match[1] ?? match[0], ref, independent: true, source } : miss('page', true);
+    }
+    return text
+      ? { found: true, value: text, ref, independent: true, source }
+      : miss('page', true);
+  }
+
+  if (source === 'agent_report' || source === 'observation') {
+    if (source === 'agent_report') {
+      return context.evidence?.agent_report?.present
+        ? {
+            found: true,
+            value: readPath(context.evidence.agent_report.value, operand.path),
+            ref: `agent_report:${context.evidence.agent_report.source}`,
+            independent: false,
+            source,
+          }
+        : miss('agent_report', false);
+    }
+    return (context.record?.observations ?? []).length > 0
+      ? { found: true, value: readPath(context.record.observations, operand.path), ref: null, independent: false, source }
+      : miss('observation', false);
+  }
+
+  // api / database / sandbox — results supplied by the connector run.
+  const bucket = context.externalResults?.[source];
+  if (!bucket) return miss(source, true);
+  const entry = bucket[operand.key];
+  if (entry === undefined) return miss(source, true);
+  const value = entry !== null && typeof entry === 'object' && 'value' in entry ? entry.value : entry;
+  const ref = entry !== null && typeof entry === 'object' && entry.evidence_ref ? entry.evidence_ref : null;
+  const resolved = operand.path ? readPath(value, operand.path) : value;
+  return resolved === undefined
+    ? { found: false, value: undefined, ref, independent: true, source }
+    : { found: true, value: resolved, ref, independent: true, source };
+}
+
+/**
+ * Evaluate a cross-system comparison: two independently observed values
+ * (or one value against a literal) compared with a shared operator.
+ */
+function evaluateComparison(comparison, context) {
+  const severity = comparison.severity ?? 'high';
+  const required = comparison.required !== false;
+  const operator = comparison.operator ?? 'equals';
+  const left = resolveOperand(comparison.left, context);
+  const rightIsOperand = Boolean(comparison.right && typeof comparison.right === 'object' && 'source' in comparison.right);
+  const right = rightIsOperand
+    ? resolveOperand(comparison.right, context)
+    : { found: true, value: comparison.right, ref: null, independent: true, source: 'literal' };
+  const crossSystems =
+    right.source !== 'literal' && Boolean(left.source) && Boolean(right.source) && left.source !== right.source;
+
+  let status;
+  let observed = null;
+  const reasonCodes = [];
+
+  if (!left.found || !right.found) {
+    status = 'inconclusive';
+    reasonCodes.push('EVIDENCE_MISSING');
+    observed = left.found ? left.value : null;
+  } else if (!left.independent || !right.independent) {
+    status = 'inconclusive';
+    reasonCodes.push('EVIDENCE_NOT_INDEPENDENT');
+    observed = left.value;
+  } else {
+    const result = evaluateOperator({ operator, expected: right.value }, left.value);
+    observed = result.actual ?? left.value;
+    if (result.ok === null) {
+      status = 'inconclusive';
+      reasonCodes.push(result.reason ?? 'EVIDENCE_MISSING');
+    } else if (result.ok) {
+      status = 'pass';
+    } else {
+      status = 'fail';
+      reasonCodes.push(crossSystems ? 'CROSS_SYSTEM_MISMATCH' : 'CHECK_VIOLATED');
+      if (!left.found || !right.found) reasonCodes.push('CROSS_SYSTEM_RECORD_MISSING');
+    }
+  }
+
+  return {
+    key: comparison.key ?? `${comparison.left?.key ?? 'left'}_${operator}_${comparison.right?.key ?? 'right'}`,
+    description: comparison.description ?? null,
+    kind: 'comparison',
+    source: crossSystems ? 'cross_system' : (left.source ?? 'unknown'),
+    independent: left.independent && right.independent,
+    operator,
+    expected: right.found ? right.value : null,
+    observed,
+    status,
+    severity,
+    required,
+    reason_codes: reasonCodes,
+    evidence_ref: left.ref ?? right.ref ?? null,
+    left: { source: left.source, path: comparison.left?.path ?? null, pattern: comparison.left?.pattern ?? null, evidence_ref: left.ref },
+    right: {
+      source: right.source,
+      path: rightIsOperand ? (comparison.right?.path ?? null) : null,
+      value: right.found ? right.value : null,
+      evidence_ref: right.ref,
+    },
+  };
+}
+
 /**
  * Produce the verification block for a COMPLETED execution.
  *
@@ -200,14 +346,18 @@ export function verifyWithChecks({
   requirementId = null,
   requirement = null,
   checks = [],
+  comparisons = [],
   record = null,
   evidence,
   externalResults = null,
 }) {
   const timestamp = new Date().toISOString();
   const list = Array.isArray(checks) ? checks : [];
+  const comparisonList = Array.isArray(comparisons) ? comparisons : [];
 
-  if (list.length === 0) {
+  // Comparisons are verifiable on their own (e.g. a pure REST-vs-SQL
+  // equality), so only an entirely empty contract has nothing to prove.
+  if (list.length === 0 && comparisonList.length === 0) {
     return {
       status: 'UNAVAILABLE',
       verdict: null,
@@ -227,22 +377,63 @@ export function verifyWithChecks({
   }
 
   const context = { record, evidence, externalResults };
-  const results = list.map((check) => evaluateCheck(check, context));
+  const byKey = new Map(list.map((check) => [check.key, check]));
 
-  const required = results.filter((r) => r.required);
+  // Dependency-aware evaluation: a check whose dependency did not pass is
+  // INCONCLUSIVE (DEPENDENCY_NOT_MET) — an unmet precondition is missing
+  // evidence, not a proven violation.
+  const resultsByKey = new Map();
+  const visiting = new Set();
+  const evaluateOne = (check) => {
+    if (resultsByKey.has(check.key)) return resultsByKey.get(check.key);
+    const deps = Array.isArray(check.depends_on) ? check.depends_on : [];
+    let result;
+    if (visiting.has(check.key)) {
+      result = blockedCheck(check, deps, ['DEPENDENCY_NOT_MET'], ['<cyclic>']);
+    } else {
+      visiting.add(check.key);
+      const unmet = deps.filter((dep) => {
+        const depCheck = byKey.get(dep);
+        return !depCheck || evaluateOne(depCheck).status !== 'pass';
+      });
+      result = unmet.length
+        ? blockedCheck(check, deps, ['DEPENDENCY_NOT_MET'], unmet)
+        : evaluateCheck(check, context);
+      result.depends_on = deps;
+      result.unmet_dependencies = unmet;
+      visiting.delete(check.key);
+    }
+    resultsByKey.set(check.key, result);
+    return result;
+  };
+
+  const results = list.map(evaluateOne);
+  const comparisonResults = comparisonList.map((comparison) =>
+    evaluateComparison(comparison, context),
+  );
+  const allResults = [...results, ...comparisonResults];
+  const crossSystem =
+    comparisonResults.length > 0 ||
+    allResults.some((r) => r.source === 'api' || r.source === 'database');
+
+  const required = allResults.filter((r) => r.required);
   const failedRequired = required.filter((r) => r.status === 'fail');
   const inconclusiveRequired = required.filter((r) => r.status === 'inconclusive');
-  const failedOptional = results.filter((r) => !r.required && r.status === 'fail');
+  const failedOptional = allResults.filter((r) => !r.required && r.status === 'fail');
 
   const reasonCodes = [];
   let verdict;
 
   if (failedRequired.length > 0) {
     verdict = 'FAIL';
-    reasonCodes.push('CHECK_VIOLATED');
+    const mismatched = allResults.some((r) => r.reason_codes.includes('CROSS_SYSTEM_MISMATCH'));
+    reasonCodes.push(mismatched ? 'CROSS_SYSTEM_MISMATCH' : 'CHECK_VIOLATED');
+    if (mismatched && allResults.some((r) => r.reason_codes.includes('CHECK_VIOLATED'))) {
+      reasonCodes.push('CHECK_VIOLATED');
+    }
     // The silent-failure signal: the browser run itself reported success.
     if (record?.execution_status === 'COMPLETED') reasonCodes.push('SILENT_FAILURE');
-    if (results.some((r) => r.reason_codes.includes('EVIDENCE_NOT_INDEPENDENT'))) {
+    if (allResults.some((r) => r.reason_codes.includes('EVIDENCE_NOT_INDEPENDENT'))) {
       reasonCodes.push('EVIDENCE_NOT_INDEPENDENT');
     }
   } else if (inconclusiveRequired.length > 0) {
@@ -273,7 +464,7 @@ export function verifyWithChecks({
           ...failedRequired.map((r) => r.severity),
         ]);
 
-  const evidenceRefs = evidenceReferences(evidence, results);
+  const evidenceRefs = evidenceReferences(evidence, allResults);
 
   const explanation = buildExplanation({ verdict, required, failedRequired, inconclusiveRequired, requirement });
 
@@ -286,7 +477,7 @@ export function verifyWithChecks({
       requirement: requirement ?? null,
       engine: LOCAL_ENGINE_ID,
       independent_verification: true,
-      expected_result: results.map((r) => ({
+      expected_result: allResults.map((r) => ({
         key: r.key,
         description: r.description,
         source: r.source,
@@ -294,13 +485,15 @@ export function verifyWithChecks({
         expected: r.expected,
         required: r.required,
       })),
-      observed_result: results.map((r) => ({
+      observed_result: allResults.map((r) => ({
         key: r.key,
         status: r.status,
         observed: r.observed,
         evidence_ref: r.evidence_ref,
       })),
-      checks: results,
+      checks: allResults,
+      comparisons: comparisonResults,
+      cross_system: crossSystem,
       failed_checks: failedRequired.map((r) => r.key),
       inconclusive_checks: inconclusiveRequired.map((r) => r.key),
       failed_optional_checks: failedOptional.map((r) => r.key),

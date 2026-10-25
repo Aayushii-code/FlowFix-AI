@@ -29,6 +29,8 @@ function agentReportedFailure(record) {
 export const ROOT_CAUSE_CLASSES = {
   SUCCESS: { label: 'Verified success', severity: 'info' },
   SILENT_FAILURE: { label: 'Silent business failure', severity: 'critical' },
+  CROSS_SYSTEM_INCONSISTENCY: { label: 'Systems disagree', severity: 'critical' },
+  CONNECTOR_FAILURE: { label: 'System could not be consulted', severity: 'high' },
   VERIFICATION_FAILED: { label: 'Outcome violated', severity: 'high' },
   EVIDENCE_GAP: { label: 'Unprovable — evidence gap', severity: 'medium' },
   AGENT_GOAL_FAILURE: { label: 'Automation failed its goal', severity: 'high' },
@@ -132,9 +134,11 @@ export function analyzeRootCause(view) {
   // ── Completed executions: the verdict is what matters ────────────────────
   if (status === 'COMPLETED') {
     if (verdict === 'FAIL') {
-      const silent = reasonCodes.includes('SILENT_FAILURE') || record?.execution_status === 'COMPLETED';
-      classification = silent ? 'SILENT_FAILURE' : 'VERIFICATION_FAILED';
+      const mismatch = reasonCodes.includes('CROSS_SYSTEM_MISMATCH');
+      const silent = !mismatch && (reasonCodes.includes('SILENT_FAILURE') || record?.execution_status === 'COMPLETED');
+      classification = mismatch ? 'CROSS_SYSTEM_INCONSISTENCY' : silent ? 'SILENT_FAILURE' : 'VERIFICATION_FAILED';
       reasons.push('CHECK_VIOLATED');
+      if (mismatch) reasons.push('CROSS_SYSTEM_MISMATCH');
       if (silent) reasons.push('SILENT_FAILURE');
 
       const failedChecks = verification?.details?.failed_checks ?? [];
@@ -157,14 +161,47 @@ export function analyzeRootCause(view) {
         action: 'If evidence shows a stale or wrong page was fetched, re-run the verification (POST /executions/:id/verify).',
         risk: SAFE_ACTION,
       });
+      if (mismatch) {
+        actions.push({
+          action: 'Compare the two systems\u2019 records side by side (both evidence refs are in the verdict) to find which one drifted.',
+          risk: SAFE_ACTION,
+        });
+        actions.push({
+          action: 'Reconciling the data by writing to either system is a business decision — require human approval and audit it.',
+          risk: APPROVAL_ACTION,
+        });
+      }
     } else if (verdict === 'INCONCLUSIVE') {
-      classification = 'EVIDENCE_GAP';
-      reasons.push(...reasonCodes.filter((c) => c.startsWith('EVIDENCE_')));
-      likelyCauses.push({
-        cause: 'Evidence was missing, unreachable or only self-reported, so the requirement could not be proven.',
-        confidence: 'certain',
-        evidence: `reasons: ${reasonCodes.join(', ')} | inconclusive: ${(verification?.details?.inconclusive_checks ?? []).join(', ')}`,
-      });
+      const connectorCode = [
+        'CONNECTOR_TIMEOUT',
+        'CONNECTOR_AUTH_FAILED',
+        'CONNECTOR_UNAVAILABLE',
+        'CONNECTOR_NOT_CONFIGURED',
+      ].find((code) => reasonCodes.includes(code));
+      const missingRecord = reasonCodes.includes('CROSS_SYSTEM_RECORD_MISSING');
+      classification = connectorCode ? 'CONNECTOR_FAILURE' : 'EVIDENCE_GAP';
+      reasons.push(...reasonCodes.filter((c) => c.startsWith('EVIDENCE_') || c.startsWith('CONNECTOR_') || c === 'DEPENDENCY_NOT_MET'));
+      if (missingRecord) reasons.push('CROSS_SYSTEM_RECORD_MISSING');
+      likelyCauses.push(
+        connectorCode
+          ? {
+              cause: `A connector could not consult its system (${connectorCode}) — that leg of the requirement is unproven, not passed.`,
+              confidence: 'certain',
+              evidence: `reasons: ${reasonCodes.join(', ')} | connector errors: ${JSON.stringify((verification?.details?.connector_errors ?? []).map((e) => e.code))}`,
+            }
+          : {
+              cause: 'Evidence was missing, unreachable or only self-reported, so the requirement could not be proven.',
+              confidence: 'certain',
+              evidence: `reasons: ${reasonCodes.join(', ')} | inconclusive: ${(verification?.details?.inconclusive_checks ?? []).join(', ')}`,
+            },
+      );
+      if (connectorCode === 'CONNECTOR_AUTH_FAILED') {
+        actions.push({ action: 'Check the credential environment variables referenced by the connector (names are in the connector error).', risk: SAFE_ACTION });
+      } else if (connectorCode === 'CONNECTOR_TIMEOUT') {
+        actions.push({ action: 'Raise the connector timeout or check the remote system\u2019s health, then re-verify.', risk: SAFE_ACTION });
+      } else if (connectorCode) {
+        actions.push({ action: 'Check connectivity/allowlist rules for the remote system, then re-verify.', risk: SAFE_ACTION });
+      }
       actions.push({ action: 'Re-run the execution to collect fresh evidence.', risk: SAFE_ACTION });
       if (reasonCodes.includes('EVIDENCE_UNREACHABLE')) {
         actions.push({ action: 'Check artifact URL reachability (expired presigned links, network egress).', risk: SAFE_ACTION });

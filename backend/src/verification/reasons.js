@@ -118,6 +118,36 @@ export const REASON_CODES = {
     severity: 'medium',
     summary: 'A required cross-system connector is not configured; that leg cannot be proven.',
   },
+  CONNECTOR_TIMEOUT: {
+    category: 'system',
+    severity: 'medium',
+    summary: 'A connector call exceeded its timeout, so that system could not be consulted.',
+  },
+  CONNECTOR_AUTH_FAILED: {
+    category: 'system',
+    severity: 'high',
+    summary: 'A connector was rejected by the remote system (missing or invalid credentials).',
+  },
+  CONNECTOR_UNAVAILABLE: {
+    category: 'system',
+    severity: 'high',
+    summary: 'A connector could not reach its system (network error, HTTP error or refused connection).',
+  },
+  CROSS_SYSTEM_MISMATCH: {
+    category: 'verification',
+    severity: 'critical',
+    summary: 'Two systems disagree about the same business value.',
+  },
+  CROSS_SYSTEM_RECORD_MISSING: {
+    category: 'verification',
+    severity: 'high',
+    summary: 'A record expected in a downstream system does not exist there.',
+  },
+  DEPENDENCY_NOT_MET: {
+    category: 'verification',
+    severity: 'medium',
+    summary: 'A check was not evaluated because a check it depends on did not pass.',
+  },
   SANDBOX_DATA: {
     category: 'system',
     severity: 'info',

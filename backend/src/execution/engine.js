@@ -229,6 +229,35 @@ export class ExecutionEngine {
   }
 
   /**
+   * Attach cross-system evidence and its verdict to an execution: evidence is
+   * appended to the record (shown by the Evidence Viewer), the verification
+   * block replaces the current one (explicit, auditable request), and both are
+   * persisted. Works for live runs and for evicted/durable history rows.
+   */
+  attachCrossSystem(executionId, { verification, evidenceItems = [] }) {
+    const execution = this.executions.get(executionId);
+    if (execution) {
+      if (!execution.record) {
+        execution.record = { execution_status: execution.status, observations: [], evidence: [] };
+      }
+      mergeEvidence(execution.record, evidenceItems);
+      execution.verification = verification;
+      execution.persist();
+      execution.emit({ kind: 'record', record: execution.record });
+      execution.emit({ kind: 'verification', verification });
+      return verification;
+    }
+
+    if (!this.persistence) throw new NotFoundError(`Execution ${executionId} not found`);
+    const row = this.persistence.get(executionId);
+    if (!row) throw new NotFoundError(`Execution ${executionId} not found`);
+    const record = row.record ?? { execution_status: row.status, observations: [], evidence: [] };
+    mergeEvidence(record, evidenceItems);
+    this.persistence.save({ ...row, record, verification });
+    return verification;
+  }
+
+  /**
    * Audit writes are observability, not business logic: a failure here is
    * logged and swallowed so it can never fail a request or a run.
    */
@@ -637,6 +666,19 @@ class Execution {
     }
     this.persist();
     this.emit({ kind: 'verification', verification: this.verification });
+  }
+}
+
+/** Append connector evidence to a record without duplicating identical items. */
+function mergeEvidence(record, items = []) {
+  if (!Array.isArray(record.evidence)) record.evidence = [];
+  for (const item of items) {
+    const key = `${item.kind}|${item.source ?? ''}|${item.url ?? ''}|${item.statement_sha256 ?? ''}`;
+    const duplicate = record.evidence.some(
+      (existing) =>
+        `${existing.kind}|${existing.source ?? ''}|${existing.url ?? ''}|${existing.statement_sha256 ?? ''}` === key,
+    );
+    if (!duplicate) record.evidence.push(item);
   }
 }
 

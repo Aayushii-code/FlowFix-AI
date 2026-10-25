@@ -97,7 +97,7 @@ export function createApp(env = process.env) {
 
   app.use('/api', createContractRoutes({ repos, engine, config }));
   app.use('/api', createSystemRoutes({ repos, config }));
-  app.use('/api', createAssuranceRoutes());
+  app.use('/api', createAssuranceRoutes({ engine, repos }));
   app.use('/api', createRoutes({ engine, config, repos, queue, verifier }));
 
   // Enterprise dashboard (vanilla, no build step) — real APIs only.
