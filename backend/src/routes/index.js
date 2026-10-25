@@ -8,6 +8,8 @@
 import { Router } from 'express';
 import { asyncRoute, NotFoundError, ValidationError, AppError } from '../errors.js';
 import { SCENARIOS, getScenario, scenarioSummaries } from '../scenarios/index.js';
+import { normalizeChecks } from '../checks/validate.js';
+import { analyzeRootCause } from '../analysis/root-cause.js';
 
 const PROFILE_VALUES = new Set(['lite', 'stealth']);
 
@@ -42,6 +44,7 @@ function validateExecutionInput(body) {
       url: scenario.url,
       goal: scenario.goal,
       expectedOutcome: scenario.expected_outcome,
+      checks: scenario.checks ?? [],
       browserProfile: scenario.browserProfile,
       agentConfig: scenario.agentConfig,
       captureConfig: scenario.captureConfig,
@@ -62,6 +65,7 @@ function validateExecutionInput(body) {
       url: body.url,
       goal: body.goal,
       expectedOutcome: body.expected_outcome ?? null,
+      checks: normalizeChecks(body.checks),
       browserProfile: body.browser_profile ?? undefined,
       agentConfig: body.agent_config ?? undefined,
       captureConfig: body.capture_config ?? undefined,
@@ -78,7 +82,23 @@ function validateExecutionInput(body) {
   return spec;
 }
 
-export function createRoutes({ engine, config }) {
+/**
+ * Clamped pagination. `?limit=abc` or a negative offset must never turn into
+ * NaN slicing (which silently returned every row).
+ */
+function parseLimit(value, fallback, max = 200) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, 1), max);
+}
+
+function parseOffset(value) {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(n, 0);
+}
+
+export function createRoutes({ engine, config, repos }) {
   const router = Router();
 
   router.get('/health', (_req, res) => {
@@ -106,8 +126,25 @@ export function createRoutes({ engine, config }) {
   }));
 
   router.get('/executions', (req, res) => {
-    const limit = req.query.limit ? Number(req.query.limit) : 50;
-    res.json({ executions: engine.list({ limit }) });
+    // Searchable run history: full-text over url/goal/requirement/id plus
+    // status, verdict, contract, scenario and time-window filters.
+    const result = engine.search({
+      q: req.query.q ?? null,
+      status: req.query.status ?? null,
+      verdict: req.query.verdict ?? null,
+      contract_id: req.query.contract_id ?? null,
+      scenario_id: req.query.scenario_id ?? null,
+      from: req.query.from ?? null,
+      to: req.query.to ?? null,
+      limit: parseLimit(req.query.limit, 50),
+      offset: parseOffset(req.query.offset),
+    });
+    res.json({
+      executions: result.executions,
+      total: result.total,
+      limit: result.limit,
+      offset: result.offset,
+    });
   });
 
   router.get('/executions/:id', asyncRoute((req, res) => {
@@ -250,6 +287,106 @@ export function createRoutes({ engine, config }) {
           : 'Verdict produced by the independent verification engine.',
     });
   }));
+
+  /**
+   * Evidence Viewer payload: every artifact and observation for one run,
+   * grouped by kind, each with its provenance, plus a coverage map showing
+   * which evidence backs which verification check.
+   */
+  router.get('/executions/:id/evidence', (req, res) => {
+    const view = engine.get(req.params.id);
+    const record = view.record ?? null;
+    const evidence = record?.evidence ?? [];
+
+    const byKind = (kind) =>
+      evidence
+        .filter((item) => item.kind === kind)
+        .map(({ events: _events, ...item }) => item);
+
+    const rawLog = evidence.find((item) => item.kind === 'raw_event_log') ?? null;
+    const eventsLimit = parseLimit(req.query.events_limit, 100, 5000);
+    const wantRaw = req.query.raw !== 'off';
+
+    // Provenance census: every fact traces back to a named source.
+    const provenance = {};
+    for (const item of [...(record?.observations ?? []), ...evidence]) {
+      const source = item.source ?? 'unknown';
+      provenance[source] = (provenance[source] ?? 0) + 1;
+    }
+
+    const checks = view.checks ?? [];
+    const verdictChecks = view.verification?.details?.checks ?? [];
+    const coverage = checks.map((check) => {
+      const evaluated = verdictChecks.find((c) => c.key === check.key) ?? null;
+      return {
+        key: check.key,
+        source: check.source,
+        status: evaluated?.status ?? 'not_evaluated',
+        evidence_ref: evaluated?.evidence_ref ?? null,
+        independent: evaluated?.independent ?? null,
+      };
+    });
+
+    res.json({
+      execution_id: view.execution_id,
+      status: view.status,
+      contract_id: view.contract_id,
+      scenario_id: view.scenario_id,
+      verification: {
+        status: view.verification?.status ?? null,
+        verdict: view.verification?.verdict ?? null,
+        evidence_references: view.verification?.details?.evidence_references ?? [],
+        reason_codes: view.verification?.details?.reason_codes ?? [],
+      },
+      observations: record?.observations ?? [],
+      artifacts: {
+        screenshots: byKind('step_screenshot'),
+        html: byKind('step_html'),
+        streams: byKind('live_stream'),
+        recordings: byKind('run_recording'),
+        api_responses: byKind('api_response'),
+        database_results: byKind('database_result'),
+      },
+      evidence_coverage: coverage,
+      evidence_fetch_error: record?.evidence_fetch_error ?? null,
+      evidence_note:
+        record?.evidence_note ??
+        'Artifacts are listed exactly as captured; missing data stays missing rather than being substituted.',
+      provenance,
+      raw_event_log: wantRaw && rawLog
+        ? {
+            event_count: rawLog.event_count,
+            returned: Math.min(rawLog.events?.length ?? 0, eventsLimit),
+            truncated: (rawLog.events?.length ?? 0) > eventsLimit,
+            events: (rawLog.events ?? []).slice(0, eventsLimit),
+            source: rawLog.source,
+          }
+        : null,
+      generated_at: new Date().toISOString(),
+    });
+  });
+
+  /**
+   * Root cause analysis for a finished run — diagnosis only; it never alters
+   * the verdict. Result is persisted so history keeps the diagnosis.
+   */
+  router.get('/executions/:id/root-cause', (req, res) => {
+    const view = engine.get(req.params.id);
+    if (!['COMPLETED', 'FAILED', 'TIMED_OUT', 'CANCELLED', 'INCOMPLETE'].includes(view.status)) {
+      throw new AppError(
+        'EXECUTION_NOT_FINISHED',
+        `Root cause analysis requires a finished execution; current status is ${view.status}`,
+        { httpStatus: 409 },
+      );
+    }
+    const analysis = analyzeRootCause(view);
+    try {
+      engine.setRootCause(view.execution_id, analysis);
+    } catch {
+      /* diagnosis must not fail the request if persistence hiccups */
+    }
+    res.json({ execution_id: view.execution_id, root_cause: analysis });
+  });
 
   return router;
 }

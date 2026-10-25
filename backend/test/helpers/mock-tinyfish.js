@@ -28,6 +28,17 @@ export function startMockTinyFish({ defaultDelayMs = 10 } = {}) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
 
+    // Artifact URLs (step HTML / screenshots) are served WITHOUT the API key,
+    // exactly like real presigned artifact links: the verification engine
+    // re-fetches page state independently of the agent's self-report.
+    const artifact = url.pathname.match(
+      /^\/mock-artifacts\/runs\/([^/]+)\/steps\/([^/]+)\/html$/,
+    );
+    if (req.method === 'GET' && artifact) {
+      handleArtifactHtml(res, artifact[1], artifact[2]);
+      return;
+    }
+
     // Auth check per docs: missing/invalid key → documented envelope.
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) {
@@ -62,6 +73,51 @@ export function startMockTinyFish({ defaultDelayMs = 10 } = {}) {
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  /** Public origin of this mock (used for fetchable artifact links). */
+  function origin() {
+    const address = server.address();
+    return `http://127.0.0.1:${address.port}`;
+  }
+
+  /**
+   * Page content captured for the run's target, keyed by scenario intent.
+   * This is the *independent* evidence the verifier fetches: the agent's
+   * result payload and this page content come from separate sources, so a
+   * disagreement between them is detectable.
+   */
+  function htmlForRun(run) {
+    const goal = (run?.goal ?? '').toLowerCase();
+    if (goal.includes('table')) {
+      return '<html><head><title>Shop</title></head><body><h1>Shop</h1>' +
+        '<ul><li>Wooden Table &pound;49.00</li><li>Coffee Table &pound;29.00</li></ul>' +
+        '</body></html>';
+    }
+    if (goal.includes('form') || goal.includes('contact')) {
+      return '<html><body><h1>Order form</h1>' +
+        '<div>customername: FlowFix Tester</div><div>email: tester@flowfix.example</div>' +
+        '<div>deliverto: 1 Test Street</div><div>comments: FlowFix verification run</div>' +
+        '</body></html>';
+    }
+    if (goal.includes('headline')) {
+      return '<html><head><title>Example Domain</title></head><body>' +
+        '<h1>Example Domain</h1>' +
+        '<p>This domain is for use in illustrative examples in documents.</p>' +
+        '</body></html>';
+    }
+    return '<html><body><p>done</p></body></html>';
+  }
+
+  function handleArtifactHtml(res, runId, stepId) {
+    const run = runs.get(runId);
+    if (!run) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('artifact expired');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(htmlForRun(run));
+  }
 
   async function handleSse(req, res, url) {
     let body = '';
@@ -220,7 +276,9 @@ export function startMockTinyFish({ defaultDelayMs = 10 } = {}) {
             status: 'COMPLETED',
             action: 'Navigate to target page',
             screenshot: `https://agent.mock.local/runs/${runId}/steps/step-0001/screenshot`,
-            html: `https://agent.mock.local/runs/${runId}/steps/step-0001/html`,
+            // HTML is the artifact the independent verifier re-fetches, so it
+            // must resolve to this server (like a real presigned artifact).
+            html: `${origin()}/mock-artifacts/runs/${runId}/steps/step-0001/html`,
             duration: '1.2s',
           },
           {

@@ -27,6 +27,26 @@ export const SCENARIOS = [
       field: 'products',
       condition: 'at least one product whose name contains "table" (case-insensitive)',
     },
+    // Machine-verifiable checks evaluated by FlowFix's independent verifier
+    // against page content it fetches itself — not the agent's self-report.
+    checks: [
+      {
+        key: 'search_results_shown',
+        description: 'The search results page lists at least one product matching "table".',
+        source: 'page',
+        operator: 'contains',
+        expected: 'table',
+        severity: 'high',
+      },
+      {
+        key: 'product_price_visible',
+        description: 'A price is visible next to the matching product.',
+        source: 'page',
+        operator: 'regex',
+        expected: '£[0-9]+',
+        severity: 'medium',
+      },
+    ],
     browserProfile: 'lite',
     captureConfig: { screenshots: true },
   },
@@ -42,6 +62,32 @@ export const SCENARIOS = [
       fields: ['customername', 'email', 'deliverto', 'comments'],
       condition: 'submitted values are echoed in the response body',
     },
+    checks: [
+      {
+        key: 'echoed_customer_name',
+        description: 'The submitted customer name appears in the confirmation page.',
+        source: 'page',
+        operator: 'contains',
+        expected: 'FlowFix Tester',
+        severity: 'high',
+      },
+      {
+        key: 'echoed_email',
+        description: 'The submitted email appears in the confirmation page.',
+        source: 'page',
+        operator: 'contains',
+        expected: 'tester@flowfix.example',
+        severity: 'high',
+      },
+      {
+        key: 'echoed_comment',
+        description: 'The submitted note appears in the confirmation page.',
+        source: 'page',
+        operator: 'contains',
+        expected: 'FlowFix verification run',
+        severity: 'medium',
+      },
+    ],
     browserProfile: 'lite',
     captureConfig: { screenshots: true },
   },
@@ -58,6 +104,27 @@ export const SCENARIOS = [
       keyword: 'illustrative',
       condition: 'headline matches exactly and keyword appears in body text',
     },
+    // Observable evidence only: both conditions are checkable against the page
+    // itself. If the page cannot be fetched, each check resolves to
+    // EVIDENCE_UNREACHABLE and the verdict is INCONCLUSIVE — never PASS.
+    checks: [
+      {
+        key: 'headline_displayed',
+        description: 'The page displays the headline "Example Domain".',
+        source: 'page',
+        operator: 'contains',
+        expected: 'Example Domain',
+        severity: 'high',
+      },
+      {
+        key: 'illustrative_keyword_present',
+        description: 'The body text mentions "illustrative".',
+        source: 'page',
+        operator: 'contains',
+        expected: 'illustrative',
+        severity: 'medium',
+      },
+    ],
     browserProfile: 'lite',
     captureConfig: { screenshots: true },
   },
@@ -76,6 +143,7 @@ export function scenarioSummaries() {
     url: s.url,
     goal: s.goal,
     expected_outcome: s.expected_outcome,
+    checks: s.checks ?? [],
     browser_profile: s.browserProfile,
   }));
 }

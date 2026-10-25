@@ -26,19 +26,29 @@ PASS / FAIL / INCONCLUSIVE.
           │              │    │                         provenance      │
           │              │    │                                       │
           │              │    └──► verification adapter ──► Meenu's    │
-          │              │            (only source of verdicts)  engine │
+          │              │            (external, precedence)    engine │
+          │              │    └──► local verifier ◄── re-fetched page  │
+          │              │         (checks only)      evidence         │
           │              │                                            │
-          │              └──► in-memory store + SSE fan-out (Aman's UI) │
+          │              ├──► job queue (in-process ⇄ Redis/BullMQ)    │
+          │              └──► SQLite: contracts, run history, audit     │
+          │                   + in-memory live runs + SSE fan-out       │
           └─────────────────────────────────────────────────────────────┘
 ```
 
 - **TinyFish executes.** Real HTTP calls to
   `https://agent.tinyfish.ai/v1/automation/run-sse`, plus `GET /v1/runs/:id`
   (step screenshots / HTML) and `POST /v1/runs/:id/cancel`.
-- **Meenu independently verifies.** The backend POSTs normalized
-  observations + evidence to `VERIFICATION_ENGINE_URL/verify` and surfaces the
-  engine's verdict verbatim. Errors/timeouts/invalid verdicts stay `verdict:
+- **Something independent verifies.** With `VERIFICATION_ENGINE_URL` set, the
+  backend POSTs normalized observations + evidence to Meenu's engine and
+  surfaces its verdict verbatim. Without it, FlowFix's own verifier
+  (`src/verification/local-engine.js`) evaluates the requirement's `checks`
+  against page content it re-fetches **itself** — the agent's self-report can
+  never produce a verdict. Errors/timeouts/invalid verdicts stay `verdict:
   null`.
+- **SQLite persists.** Contracts, run history and the audit log live in a
+  database file (`DATABASE_PATH`), applied through ordered migrations, behind
+  a repository layer (`src/db/repos/`) so PostgreSQL can replace it later.
 - **Aman's frontend** consumes the REST + SSE contract documented in
   [`docs/API.md`](docs/API.md).
 
@@ -83,8 +93,11 @@ curl -N http://localhost:3000/api/executions/<execution_id>/events
 | `PORT` | `3000` | HTTP port |
 | `EXECUTION_TIMEOUT_MS` | `300000` | Hard watchdog; on expiry the run is cancelled and marked `TIMED_OUT` |
 | `MAX_CONCURRENT_EXECUTIONS` | `3` | Reject with `429 CONCURRENCY_LIMIT` beyond this |
-| `VERIFICATION_ENGINE_URL` | — | Meenu's engine. Empty ⇒ verdicts stay `null` |
+| `VERIFICATION_ENGINE_URL` | — | Meenu's engine. When set it **overrides** local verification |
 | `VERIFICATION_TIMEOUT_MS` | `20000` | Engine request timeout |
+| `LOCAL_VERIFICATION` | `on` | FlowFix's own verifier; `off` ⇒ verdicts stay `null` when no external engine |
+| `DATABASE_PATH` | `data/flowfix.db` | SQLite file (contracts, run history, audit log); `:memory:` for throwaway runs |
+| `CORS_ORIGINS` | — (dev `*`) | Comma-separated allowlist before exposing the port |
 
 Secrets live only in `.env` (gitignored). `.env.example` documents every key.
 
@@ -126,7 +139,7 @@ URL, the verbatim event log). Missing data stays missing — no placeholders.
 ## Testing
 
 ```bash
-npm test               # 55 tests: unit + integration against a faithful TinyFish mock
+npm test               # 80 tests: unit + integration against a faithful TinyFish mock
 npm run test:unit
 npm run test:integration
 ```
@@ -139,8 +152,15 @@ The integration suite starts:
 - a **mock verification engine** implementing Meenu's contract.
 
 It exercises every endpoint, all three scenarios, timeout, cancel, upstream
-402 failure, goal-level failure, SSE fan-out, and the invariant that an
-execution without a verdict is never reported as PASS.
+402 failure, goal-level failure, SSE fan-out, run-history search and the
+invariant that an execution without a verdict is never reported as PASS.
+
+The mock also serves **fetchable step-HTML artifacts** (like real presigned
+links), so the local verifier's independent re-fetch runs end-to-end offline:
+`test/unit/local-verification.test.js` pins the verdict matrix — PASS needs
+independent evidence, a proven violation is FAIL (with `SILENT_FAILURE` when
+the agent claimed success), and missing/unreachable/self-reported-only
+evidence is always INCONCLUSIVE.
 
 ### Live end-to-end smoke test (real browser)
 
@@ -161,12 +181,17 @@ Full contract for the frontend and the verification engine:
 
 ## Scope & limitations
 
-- **No frontend, no oracle/verification logic here.** This service executes,
-  normalizes evidence, and integrates; verdicts belong to Meenu's engine.
-- Executions are stored in process memory (no database) — intentionally, to
-  keep this service focused; restarting clears history. The store is bounded:
-  it retains the latest 500 executions and evicts the oldest completed ones
-  (running executions are never evicted).
+- **Verdicts never come from the browser agent.** An external engine wins when
+  configured; otherwise FlowFix's own verifier decides from independently
+  fetched evidence. With neither, the verdict stays `null` (`UNAVAILABLE`).
+- **Live runs are in memory, history is in SQLite.** SSE subscribers need the
+  live object, so active executions stay in process; every transition is also
+  written to the database, which is the source of truth for run history and
+  survives restarts. The in-memory layer stays bounded: the latest 500
+  executions (running ones are never evicted) — evicted runs remain
+  retrievable through the API because history is durable.
+- **No authentication yet.** The API is open; set `CORS_ORIGINS` and put it
+  behind auth before exposing the port beyond localhost.
 - The `scrapeme.live` / `httpbin.org` / `example.com` targets are public
   automation-friendly sites used by TinyFish's own docs examples.
 - `GET /v1/runs/:id` evidence (screenshots) is fetched after the stream

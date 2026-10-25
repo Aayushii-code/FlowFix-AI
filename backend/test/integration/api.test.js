@@ -12,12 +12,18 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { createApp } from '../../src/app.js';
 import { startMockTinyFish, startMockVerificationEngine } from '../helpers/mock-tinyfish.js';
 
-/** Start the app on an ephemeral port against the mocks. */
-function startApp(env) {
-  const { app, config, engine } = createApp(env);
+/** Start the app on an ephemeral port against the mocks, with its own DB. */
+function startApp(env = {}) {
+  const { app, config, engine, close: closeApp } = createApp({
+    DATABASE_PATH: path.join(os.tmpdir(), `flowfix-test-${crypto.randomUUID()}.db`),
+    ...env,
+  });
   return new Promise((resolve) => {
     const server = app.listen(0, '127.0.0.1', () => {
       resolve({
@@ -30,6 +36,7 @@ function startApp(env) {
             // Keep-alive sockets from fetch would otherwise hold the listener
             // open until their idle timeout, stalling the whole test run.
             server.closeAllConnections?.();
+            closeApp?.(); // release this test's SQLite handle
           }),
       });
     });
